@@ -1363,18 +1363,70 @@ def main() -> None:
 
     if port:
         logger.info("Bot is starting in webhook mode on port %s...", port)
-        webhook_kwargs = {
-            "listen": "0.0.0.0",
-            "port": int(port),
-            "url_path": "webhook",
-            "drop_pending_updates": True,
-        }
-        if webhook_url:
-            webhook_kwargs["webhook_url"] = f"{webhook_url}/webhook"
-        application.run_webhook(**webhook_kwargs)
+        import asyncio
+        asyncio.run(_run_webhook(application, int(port), webhook_url))
     else:
         logger.info("Bot is starting polling...")
         application.run_polling(drop_pending_updates=True)
+
+
+async def _run_webhook(application: Application, port: int, webhook_url: str) -> None:
+    """Start a lightweight HTTP server immediately, then initialize the bot."""
+    from aiohttp import web
+    import asyncio
+
+    # Queue to hold the initialized application
+    app_ready = asyncio.Event()
+
+    async def health_handler(request: web.Request) -> web.Response:
+        """Health check endpoint — responds immediately."""
+        return web.Response(text="OK")
+
+    async def webhook_handler(request: web.Request) -> web.Response:
+        """Process incoming Telegram updates."""
+        if not app_ready.is_set():
+            return web.Response(status=503, text="Starting")
+        try:
+            data = await request.json()
+            update = Update.de_json(data, application.bot)
+            await application.process_update(update)
+        except Exception as exc:
+            logger.error("Error processing update: %s", exc, exc_info=True)
+        return web.Response(text="OK")
+
+    # Create and start HTTP server immediately (satisfies Cloud Run health check)
+    aio_app = web.Application()
+    aio_app.router.add_get("/", health_handler)
+    aio_app.router.add_post("/webhook", webhook_handler)
+
+    runner = web.AppRunner(aio_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info("HTTP server listening on port %d", port)
+
+    # Now initialize the bot application (sheet connection, etc.)
+    await application.initialize()
+    await application.start()
+
+    # Set webhook with Telegram
+    if webhook_url:
+        await application.bot.set_webhook(
+            url=f"{webhook_url}/webhook",
+            drop_pending_updates=True,
+        )
+        logger.info("Webhook set to %s/webhook", webhook_url)
+
+    app_ready.set()
+    logger.info("Bot is ready to process updates.")
+
+    # Keep running forever
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await application.stop()
+        await application.shutdown()
+        await runner.cleanup()
 
 
 if __name__ == "__main__":
