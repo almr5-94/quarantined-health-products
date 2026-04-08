@@ -1245,22 +1245,28 @@ async def fallback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 # ---------------------------------------------------------------------------
 
 
+async def post_init(application: Application) -> None:
+    """Connect to Google Sheets after the bot starts (avoids Cloud Run timeout)."""
+    env = {v: os.getenv(v, "") for v in REQUIRED_ENV_VARS}
+    worksheet = get_sheet(env["GOOGLE_CREDS_PATH"], env["GOOGLE_SHEET_ID"])
+    validate_sheet_headers(worksheet)
+    logger.info("Google Sheet connected and headers validated.")
+    application.bot_data["worksheet"] = worksheet
+
+
 def main() -> None:
     """Validate configuration, connect to services, and start the bot."""
     # Validate environment variables
     env = validate_env_vars()
     logger.info("All environment variables loaded successfully.")
 
-    # Validate Google Sheet connection and headers
-    worksheet = get_sheet(env["GOOGLE_CREDS_PATH"], env["GOOGLE_SHEET_ID"])
-    validate_sheet_headers(worksheet)
-    logger.info("Google Sheet connected and headers validated.")
-
-    # Build the Telegram Application
-    application = Application.builder().token(env["TELEGRAM_BOT_TOKEN"]).build()
-
-    # Store the worksheet in bot_data for access in handlers
-    application.bot_data["worksheet"] = worksheet
+    # Build the Telegram Application (sheet connection deferred to post_init)
+    application = (
+        Application.builder()
+        .token(env["TELEGRAM_BOT_TOKEN"])
+        .post_init(post_init)
+        .build()
+    )
 
     # Define the ConversationHandler for /add
     conv_handler = ConversationHandler(
