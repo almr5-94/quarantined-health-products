@@ -805,7 +805,7 @@ async def receive_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         inspector = "unknown"
     timestamp = datetime.now(KUWAIT_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
-    worksheet = context.bot_data.get("worksheet")
+    worksheet = get_fresh_worksheet()
     try:
         append_quarantine_entry(
             worksheet=worksheet,
@@ -1097,7 +1097,7 @@ async def _bulk_save_all(query, context: ContextTypes.DEFAULT_TYPE) -> int:
         inspector = str(user.id)
     else:
         inspector = "unknown"
-    worksheet = context.bot_data.get("worksheet")
+    worksheet = get_fresh_worksheet()
     status = context.user_data.get("bulk_status", "Quarantined")
 
     saved = 0
@@ -1161,7 +1161,7 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     logger.info("/check invoked by user_id=%s shop=%s", user_id, shop_id)
 
-    worksheet = context.bot_data.get("worksheet")
+    worksheet = get_fresh_worksheet()
     try:
         records = query_active_items(worksheet, shop_id)
     except gspread.exceptions.APIError as exc:
@@ -1245,13 +1245,18 @@ async def fallback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 # ---------------------------------------------------------------------------
 
 
+def get_fresh_worksheet() -> gspread.Worksheet:
+    """Get a fresh worksheet connection (avoids stale token issues)."""
+    creds_path = os.getenv("GOOGLE_CREDS_PATH", "")
+    sheet_id = os.getenv("GOOGLE_SHEET_ID", "")
+    return get_sheet(creds_path, sheet_id)
+
+
 async def post_init(application: Application) -> None:
-    """Connect to Google Sheets after the bot starts (avoids Cloud Run timeout)."""
-    env = {v: os.getenv(v, "") for v in REQUIRED_ENV_VARS}
-    worksheet = get_sheet(env["GOOGLE_CREDS_PATH"], env["GOOGLE_SHEET_ID"])
+    """Validate Google Sheets connection after the bot starts."""
+    worksheet = get_fresh_worksheet()
     validate_sheet_headers(worksheet)
     logger.info("Google Sheet connected and headers validated.")
-    application.bot_data["worksheet"] = worksheet
 
 
 def main() -> None:
