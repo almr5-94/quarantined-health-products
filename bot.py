@@ -1353,17 +1353,19 @@ def main() -> None:
 
     # Determine run mode: webhook (Cloud Run) or polling (local)
     port = os.getenv("PORT")
-    webhook_url = os.getenv("WEBHOOK_URL")
+    webhook_url = os.getenv("WEBHOOK_URL", "")
 
-    if port and webhook_url:
+    if port:
         logger.info("Bot is starting in webhook mode on port %s...", port)
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=int(port),
-            url_path="webhook",
-            webhook_url=f"{webhook_url}/webhook",
-            drop_pending_updates=True,
-        )
+        webhook_kwargs = {
+            "listen": "0.0.0.0",
+            "port": int(port),
+            "url_path": "webhook",
+            "drop_pending_updates": True,
+        }
+        if webhook_url:
+            webhook_kwargs["webhook_url"] = f"{webhook_url}/webhook"
+        application.run_webhook(**webhook_kwargs)
     else:
         logger.info("Bot is starting polling...")
         application.run_polling(drop_pending_updates=True)
