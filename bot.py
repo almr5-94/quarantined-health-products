@@ -159,9 +159,11 @@ def get_sheet(creds_path: str, sheet_id: str) -> gspread.Worksheet:
         "https://www.googleapis.com/auth/drive",
     ]
     creds_json = os.getenv("GOOGLE_CREDS_JSON", "")
+    # Also check if GOOGLE_CREDS_PATH contains inline JSON (starts with '{')
+    if not creds_json and creds_path and creds_path.strip().startswith("{"):
+        creds_json = creds_path
     if creds_json:
-        import json as _json
-        info = _json.loads(creds_json)
+        info = json.loads(creds_json)
         credentials = ServiceAccountCredentials.from_service_account_info(
             info, scopes=scopes
         )
