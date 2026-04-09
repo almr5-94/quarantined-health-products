@@ -87,18 +87,20 @@ def validate_env_vars() -> dict[str, str]:
 # ---------------------------------------------------------------------------
 # Conversation states
 # ---------------------------------------------------------------------------
-WAITING_PRODUCT_NAME: int = 0
-WAITING_PHOTO: int = 1
-CONFIRMING: int = 2
-MANUAL_INPUT: int = 3
-WAITING_QUANTITY: int = 4
-WAITING_STATUS: int = 5
-WAITING_NEXT_OR_DONE: int = 6
+WAITING_PLACE_NAME: int = 0
+WAITING_PRODUCT_NAME: int = 1
+WAITING_PHOTO: int = 2
+CONFIRMING: int = 3
+MANUAL_INPUT: int = 4
+WAITING_QUANTITY: int = 5
+WAITING_STATUS: int = 6
+WAITING_NEXT_OR_DONE: int = 7
 
 # Bulk flow states
-BULK_WAITING_PHOTO: int = 10
-BULK_REVIEW: int = 11
-BULK_EDITING: int = 12
+BULK_WAITING_PLACE_NAME: int = 10
+BULK_WAITING_PHOTO: int = 11
+BULK_REVIEW: int = 12
+BULK_EDITING: int = 13
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -106,7 +108,8 @@ BULK_EDITING: int = 12
 KUWAIT_TZ = ZoneInfo("Asia/Kuwait")
 REQUIRED_HEADERS: list[str] = [
     "Timestamp",
-    "Shop_Identifier",
+    "PACI_Number",
+    "Place_Name",
     "Product_Name",
     "Batch_Number",
     "Expiry_Date",
@@ -115,7 +118,6 @@ REQUIRED_HEADERS: list[str] = [
     "Status",
 ]
 MAX_QTY_RETRIES: int = 3
-MAX_CHECK_RESULTS: int = 15
 VISION_MODEL: str = "gemma-4-31b-it"
 
 VISION_PROMPT: str = (
@@ -206,7 +208,8 @@ def validate_sheet_headers(worksheet: gspread.Worksheet) -> bool:
 
 def append_quarantine_entry(
     worksheet: gspread.Worksheet,
-    shop_id: str,
+    paci_number: str,
+    place_name: str,
     product_name: str,
     batch_number: str,
     expiry_date: str,
@@ -218,7 +221,8 @@ def append_quarantine_entry(
     timestamp = datetime.now(KUWAIT_TZ).strftime("%Y-%m-%d %H:%M:%S")
     row = [
         timestamp,
-        shop_id,
+        paci_number,
+        place_name,
         product_name,
         batch_number,
         expiry_date,
@@ -228,8 +232,9 @@ def append_quarantine_entry(
     ]
     worksheet.append_row(row, value_input_option="USER_ENTERED")
     logger.info(
-        "Sheet write: shop=%s batch=%s expiry=%s qty=%d inspector=%s",
-        shop_id,
+        "Sheet write: paci=%s place=%s batch=%s expiry=%s qty=%d inspector=%s",
+        paci_number,
+        place_name,
         batch_number,
         expiry_date,
         quantity,
@@ -237,19 +242,17 @@ def append_quarantine_entry(
     )
 
 
-def query_active_items(worksheet: gspread.Worksheet, shop_id: str) -> list[dict]:
-    """Return all rows where Shop_Identifier matches and Status is Quarantined or Confiscated.
+def query_items_by_paci(worksheet: gspread.Worksheet, paci_number: str) -> list[dict]:
+    """Return ALL rows where PACI_Number matches (any status).
 
     Matching is case-insensitive and stripped of surrounding whitespace.
     """
     all_records = worksheet.get_all_records()
-    target = shop_id.strip().lower()
-    active_statuses = {"Quarantined", "Confiscated"}
+    target = paci_number.strip().lower()
     return [
         r
         for r in all_records
-        if str(r.get("Shop_Identifier", "")).strip().lower() == target
-        and str(r.get("Status", "")).strip() in active_statuses
+        if str(r.get("PACI_Number", "")).strip().lower() == target
     ]
 
 
@@ -495,10 +498,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text(
         "👋 Welcome, Inspector.\n\n"
         "Available commands:\n"
-        "• `/add <Shop>` — Log quarantined products one by one\n"
-        "• `/bulk <Shop>` — Upload a table photo to log multiple products at once\n"
-        "• `/check <Shop>` — View active quarantined items for a shop\n"
-        "• `/done` — Finish adding products for the current shop\n"
+        "• `/add <PACI>` — Log quarantined products one by one\n"
+        "• `/bulk <PACI>` — Upload a table photo to log multiple products at once\n"
+        "• `/check <PACI>` — View all records for a place\n"
+        "• `/done` — Finish adding products for the current place\n"
         "• `/cancel` — Cancel the current operation",
         parse_mode="Markdown",
     )
@@ -509,24 +512,40 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     user_id = update.effective_user.id if update.effective_user else "unknown"
 
     args_text = update.message.text.strip()
-    # Remove the /add prefix (handles both "/add" and "/add@botname")
     prefix_match = re.match(r"^/add(?:@\S+)?\s*(.*)", args_text, re.DOTALL)
-    shop_id = prefix_match.group(1).strip() if prefix_match else ""
+    paci = prefix_match.group(1).strip() if prefix_match else ""
 
-    if not shop_id:
-        logger.info("/add invoked with no shop identifier by user_id=%s", user_id)
+    if not paci:
+        logger.info("/add invoked with no PACI by user_id=%s", user_id)
         await update.message.reply_text(
-            "Usage: `/add <Shop_Identifier>` — please include the shop's license number or name.",
+            "Usage: `/add <PACI_Number>` — please include the PACI number.",
             parse_mode="Markdown",
         )
         return ConversationHandler.END
 
-    logger.info("/add invoked by user_id=%s shop=%s", user_id, shop_id)
-    context.user_data["shop_id"] = shop_id
+    logger.info("/add invoked by user_id=%s paci=%s", user_id, paci)
+    context.user_data["paci_number"] = paci
+    context.user_data["place_name"] = ""
     context.user_data["product_name"] = ""
     context.user_data["batch_number"] = ""
     context.user_data["expiry_date"] = ""
     context.user_data["qty_retries"] = 0
+
+    await update.message.reply_text(
+        "🏪 What is the name of the place (pharmacy/shop)?"
+    )
+    return WAITING_PLACE_NAME
+
+
+async def receive_place_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle text input for the place name."""
+    text = update.message.text.strip() if update.message.text else ""
+    if not text:
+        await update.message.reply_text("🏪 Please type the place name:")
+        return WAITING_PLACE_NAME
+
+    context.user_data["place_name"] = text
+    logger.info("Place name received: %s", text)
 
     await update.message.reply_text(
         "📝 What is the product name?"
@@ -791,7 +810,8 @@ async def receive_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     context.user_data["status"] = status
 
     # Write to Google Sheet
-    shop_id = context.user_data.get("shop_id", "")
+    paci_number = context.user_data.get("paci_number", "")
+    place_name = context.user_data.get("place_name", "")
     product_name = context.user_data.get("product_name", "")
     batch_number = context.user_data.get("batch_number", "")
     expiry_date = context.user_data.get("expiry_date", "")
@@ -809,7 +829,8 @@ async def receive_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     try:
         append_quarantine_entry(
             worksheet=worksheet,
-            shop_id=shop_id,
+            paci_number=paci_number,
+            place_name=place_name,
             product_name=product_name,
             batch_number=batch_number,
             expiry_date=expiry_date,
@@ -832,7 +853,7 @@ async def receive_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     await query.edit_message_text(
         f"✅ Entry logged:\n"
-        f"• Shop: `{shop_id}`\n"
+        f"• PACI: `{paci_number}` — {place_name}\n"
         f"• Product: `{product_name}`\n"
         f"• Batch: `{batch_number}` — Expiry: `{expiry_date}`\n"
         f"• Qty: `{quantity}`\n"
@@ -842,7 +863,7 @@ async def receive_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"📝 Send the next product name to add another, or type /done to finish.",
         parse_mode="Markdown",
     )
-    # Reset per-product fields, keep shop_id
+    # Reset per-product fields, keep paci/place
     context.user_data["product_name"] = ""
     context.user_data["batch_number"] = ""
     context.user_data["expiry_date"] = ""
@@ -871,15 +892,16 @@ async def handle_next_or_done(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle the /done command — finish adding products for the current shop."""
-    shop_id = context.user_data.get("shop_id", "")
+    """Handle the /done command — finish adding products for the current place."""
+    paci = context.user_data.get("paci_number", "")
+    place = context.user_data.get("place_name", "")
     logger.info(
-        "/done invoked by user_id=%s for shop=%s",
+        "/done invoked by user_id=%s for paci=%s",
         update.effective_user.id if update.effective_user else "unknown",
-        shop_id,
+        paci,
     )
     await update.message.reply_text(
-        f"✅ Done adding products for `{shop_id}`.",
+        f"✅ Done adding products for `{place}` (PACI: `{paci}`).",
         parse_mode="Markdown",
     )
     return ConversationHandler.END
@@ -896,19 +918,36 @@ async def bulk_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
     args_text = update.message.text.strip()
     prefix_match = re.match(r"^/bulk(?:@\S+)?\s*(.*)", args_text, re.DOTALL)
-    shop_id = prefix_match.group(1).strip() if prefix_match else ""
+    paci = prefix_match.group(1).strip() if prefix_match else ""
 
-    if not shop_id:
-        logger.info("/bulk invoked with no shop identifier by user_id=%s", user_id)
+    if not paci:
+        logger.info("/bulk invoked with no PACI by user_id=%s", user_id)
         await update.message.reply_text(
-            "Usage: `/bulk <Shop_Identifier>` — please include the shop's license number or name.",
+            "Usage: `/bulk <PACI_Number>` — please include the PACI number.",
             parse_mode="Markdown",
         )
         return ConversationHandler.END
 
-    logger.info("/bulk invoked by user_id=%s shop=%s", user_id, shop_id)
-    context.user_data["shop_id"] = shop_id
+    logger.info("/bulk invoked by user_id=%s paci=%s", user_id, paci)
+    context.user_data["paci_number"] = paci
+    context.user_data["place_name"] = ""
     context.user_data["bulk_items"] = []
+
+    await update.message.reply_text(
+        "🏪 What is the name of the place (pharmacy/shop)?"
+    )
+    return BULK_WAITING_PLACE_NAME
+
+
+async def bulk_receive_place_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle text input for the place name in bulk flow."""
+    text = update.message.text.strip() if update.message.text else ""
+    if not text:
+        await update.message.reply_text("🏪 Please type the place name:")
+        return BULK_WAITING_PLACE_NAME
+
+    context.user_data["place_name"] = text
+    logger.info("Bulk place name received: %s", text)
 
     await update.message.reply_text(
         "📸 Send a photo of the table/list containing the products, "
@@ -1089,7 +1128,8 @@ async def bulk_edit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def _bulk_save_all(query, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Save all bulk items to the Google Sheet."""
     items = context.user_data.get("bulk_items", [])
-    shop_id = context.user_data.get("shop_id", "")
+    paci_number = context.user_data.get("paci_number", "")
+    place_name = context.user_data.get("place_name", "")
     user = query.from_user
     if user and user.username:
         inspector = f"@{user.username}"
@@ -1112,7 +1152,8 @@ async def _bulk_save_all(query, context: ContextTypes.DEFAULT_TYPE) -> int:
 
             append_quarantine_entry(
                 worksheet=worksheet,
-                shop_id=shop_id,
+                paci_number=paci_number,
+                place_name=place_name,
                 product_name=product_name,
                 batch_number=batch_number,
                 expiry_date=expiry_date,
@@ -1137,33 +1178,33 @@ async def _bulk_save_all(query, context: ContextTypes.DEFAULT_TYPE) -> int:
         return ConversationHandler.END
 
     await query.edit_message_text(
-        f"✅ All *{saved} product(s)* saved for shop `{shop_id}`.",
+        f"✅ All *{saved} product(s)* saved for `{place_name}` (PACI: `{paci_number}`).",
         parse_mode="Markdown",
     )
     return ConversationHandler.END
 
 
 async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle the /check command — look up active quarantined items for a shop."""
+    """Handle the /check command — look up all records for a PACI number."""
     user_id = update.effective_user.id if update.effective_user else "unknown"
 
     args_text = update.message.text.strip()
     prefix_match = re.match(r"^/check(?:@\S+)?\s*(.*)", args_text, re.DOTALL)
-    shop_id = prefix_match.group(1).strip() if prefix_match else ""
+    paci = prefix_match.group(1).strip() if prefix_match else ""
 
-    if not shop_id:
-        logger.info("/check invoked with no shop identifier by user_id=%s", user_id)
+    if not paci:
+        logger.info("/check invoked with no PACI by user_id=%s", user_id)
         await update.message.reply_text(
-            "Usage: `/check <Shop_Identifier>` — please include the shop's license number or name.",
+            "Usage: `/check <PACI_Number>` — please include the PACI number.",
             parse_mode="Markdown",
         )
         return
 
-    logger.info("/check invoked by user_id=%s shop=%s", user_id, shop_id)
+    logger.info("/check invoked by user_id=%s paci=%s", user_id, paci)
 
     worksheet = get_fresh_worksheet()
     try:
-        records = query_active_items(worksheet, shop_id)
+        records = query_items_by_paci(worksheet, paci)
     except gspread.exceptions.APIError as exc:
         logger.error("Google Sheets API error during /check: %s", exc, exc_info=True)
         await update.message.reply_text(
@@ -1179,16 +1220,20 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if not records:
         await update.message.reply_text(
-            f"✅ No active items found for `{shop_id}`.",
+            f"✅ No records found for PACI `{paci}`.",
             parse_mode="Markdown",
         )
         return
 
+    place_name = records[0].get("Place_Name", "N/A")
     total = len(records)
-    display_records = records[:MAX_CHECK_RESULTS]
-    lines = [f"📋 Active items for `{shop_id}`:\n"]
 
-    for i, r in enumerate(display_records, 1):
+    # Split into multiple messages if too long (Telegram has 4096 char limit)
+    header = f"📋 *{place_name}* — PACI `{paci}` — {total} record(s):\n\n"
+    messages = []
+    current_msg = header
+
+    for i, r in enumerate(records, 1):
         product = r.get("Product_Name", "N/A")
         batch = r.get("Batch_Number", "N/A")
         expiry = r.get("Expiry_Date", "N/A")
@@ -1196,15 +1241,20 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         status = r.get("Status", "N/A")
         date = r.get("Timestamp", "N/A")
         inspector = r.get("Inspector_Username", "N/A")
-        lines.append(
+        line = (
             f"{i}. *{product}* — Batch `{batch}` — Expiry `{expiry}` — Qty: {qty} "
-            f"— _{status}_ (logged {date} by {inspector})"
+            f"— _{status}_ ({date} by {inspector})\n"
         )
+        if len(current_msg) + len(line) > 4000:
+            messages.append(current_msg)
+            current_msg = ""
+        current_msg += line
 
-    if total > MAX_CHECK_RESULTS:
-        lines.append(f"\nShowing {MAX_CHECK_RESULTS} of {total} records. Contact admin for full export.")
+    if current_msg:
+        messages.append(current_msg)
 
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    for msg in messages:
+        await update.message.reply_text(msg, parse_mode="Markdown")
 
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1277,6 +1327,11 @@ def main() -> None:
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("add", add_command)],
         states={
+            WAITING_PLACE_NAME: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND, receive_place_name
+                ),
+            ],
             WAITING_PRODUCT_NAME: [
                 MessageHandler(
                     filters.TEXT & ~filters.COMMAND, receive_product_name
@@ -1329,6 +1384,11 @@ def main() -> None:
     bulk_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("bulk", bulk_command)],
         states={
+            BULK_WAITING_PLACE_NAME: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND, bulk_receive_place_name
+                ),
+            ],
             BULK_WAITING_PHOTO: [
                 MessageHandler(filters.PHOTO | filters.Document.PDF | filters.Document.IMAGE, bulk_receive_photo),
                 MessageHandler(
